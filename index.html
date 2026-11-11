@@ -115,26 +115,41 @@ $("addr").addEventListener("input", () => {
   if (q.length < 3) { $("suggestions").replaceChildren(); return; }
   timer = setTimeout(() => suggest(q), 300);
 });
-async function suggest(q) {
-  try {
-    let url = `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(q)}&limit=5&autocomplete=1`;
-    if (lastPos) url += `&lat=${lastPos.lat}&lon=${lastPos.lon}`;
-    const j = await (await fetch(url)).json();
-    const box = $("suggestions");
-    box.replaceChildren();
-    j.features.forEach(f => {
-      const b = el("button", { type: "button", textContent: f.properties.label });
-      b.onclick = () => {
-        selected = { label: f.properties.label, lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] };
-        $("addr").value = selected.label;
-        box.replaceChildren();
-        $("add").disabled = false;
-      };
-      box.append(b);
-    });
-  } catch { $("formErr").textContent = "Service d'adresses injoignable. Vérifiez la connexion."; }
+async function fetchAddresses(q, withPos, withAuto) {
+  let url = `https://data.geopf.fr/geocodage/search/?q=${encodeURIComponent(q)}&limit=5`;
+  if (withAuto) url += "&autocomplete=1";
+  if (withPos && lastPos) url += `&lat=${lastPos.lat}&lon=${lastPos.lon}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const j = await r.json();
+  if (!Array.isArray(j.features)) throw new Error("réponse inattendue");
+  return j.features;
 }
-
+async function suggest(q) {
+  const box = $("suggestions");
+  let features = null, lastErr = null;
+  // Essais successifs : complet, sans position, sans autocomplétion
+  for (const [pos, auto] of [[true, true], [false, true], [false, false]]) {
+    try { features = await fetchAddresses(q, pos, auto); break; }
+    catch (e) { lastErr = e; }
+  }
+  if (!features) {
+    $("formErr").textContent = `Service d'adresses injoignable (${lastErr && lastErr.message}).`;
+    return;
+  }
+  $("formErr").textContent = "";
+  box.replaceChildren();
+  features.forEach(f => {
+    const b = el("button", { type: "button", textContent: f.properties.label });
+    b.onclick = () => {
+      selected = { label: f.properties.label, lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] };
+      $("addr").value = selected.label;
+      box.replaceChildren();
+      $("add").disabled = false;
+    };
+    box.append(b);
+  });
+}
 /* ---------- Liste des livraisons ---------- */
 $("add").onclick = () => {
   $("formErr").textContent = "";

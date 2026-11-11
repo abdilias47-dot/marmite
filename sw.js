@@ -19,6 +19,4 @@ self.addEventListener("fetch", e => {
     fetch(e.request, { cache: "no-store" })
       .catch(() => caches.match(e.request))
   );
-});
-
-
+}); 

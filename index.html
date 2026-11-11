@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>La Marmite d'Or – Tournées</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<meta name="theme-color" content="#b45309">
+<style>
+  :root { --main:#b45309; --bg:#fffaf3; --card:#fff; --text:#1f1a14; --muted:#6b6258; --line:#e8dfd2; }
+  * { box-sizing:border-box; }
+  body { margin:0 auto; font-family:system-ui,Roboto,sans-serif; background:var(--bg); color:var(--text);
+         padding:env(safe-area-inset-top) 16px calc(24px + env(safe-area-inset-bottom)); max-width:560px; }
+  h1 { font-size:1.3rem; margin:18px 0 4px; color:var(--main); }
+  .sub { color:var(--muted); font-size:.9rem; margin-bottom:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  label { display:block; font-size:.85rem; color:var(--muted); margin:8px 0 4px; }
+  input { width:100%; padding:12px; font-size:1rem; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  button, .btn { display:block; text-align:center; text-decoration:none; border:0; border-radius:8px; padding:14px;
+                 font-size:1rem; font-weight:600; cursor:pointer; background:var(--main); color:#fff; width:100%; margin-top:10px; }
+  button.secondary { background:#efe6d8; color:var(--text); }
+  button:disabled { opacity:.5; }
+  #suggestions { margin-top:4px; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  #suggestions:empty { display:none; }
+  #suggestions button { text-align:left; background:#fff; color:var(--text); border-radius:0; margin:0;
+                        border-bottom:1px solid var(--line); font-weight:400; font-size:.95rem; }
+  #suggestions button:last-child { border-bottom:0; }
+  ul, ol { list-style:none; margin:0; padding:0; }
+  li.stop { display:flex; justify-content:space-between; gap:10px; align-items:center; padding:10px 0; border-bottom:1px solid var(--line); }
+  li.stop:last-child { border-bottom:0; }
+  .stop-name { font-weight:600; }
+  .stop-addr, .leg { font-size:.85rem; color:var(--muted); }
+  .rm { background:transparent; color:#b91c1c; padding:6px 12px; font-size:1.2rem; width:auto; margin:0; }
+  .total { font-size:1.15rem; font-weight:700; margin-bottom:8px; }
+  .step { padding:10px 0; border-bottom:1px solid var(--line); }
+  .step:last-child { border-bottom:0; }
+  .num { font-weight:700; color:var(--main); }
+  .err { color:#b91c1c; font-size:.9rem; margin-top:8px; }
+  .ok { color:#15803d; }
+</style>
+</head>
+<body>
+<h1>La Marmite d'Or</h1>
+<div class="sub">Tournée optimisée – départ depuis votre position, retour au départ.</div>
+
+<div class="card">
+  <div id="gps" class="sub" style="margin:0">Localisation en cours…</div>
+  <button class="secondary" id="relocate">Actualiser ma position</button>
+</div>
+
+<div class="card">
+  <label for="name">Nom du client</label>
+  <input id="name" autocomplete="off" enterkeyhint="next" placeholder="Ex. Mme Dupont">
+  <label for="addr">Adresse</label>
+  <input id="addr" type="text" inputmode="text" autocomplete="off" autocorrect="off" enterkeyhint="search" placeholder="Numéro, rue, ville">
+  <div id="suggestions"></div>
+  <button id="add" disabled>Ajouter la livraison</button>
+  <div id="formErr" class="err"></div>
+</div>
+
+<div class="card" id="stopsCard" hidden>
+  <ul id="stops"></ul>
+  <button id="calc">Calculer le trajet optimal</button>
+  <div id="calcErr" class="err"></div>
+</div>
+
+<div class="card" id="result" hidden></div>
+
+<script>
+const MAX_STOPS = 8;   // Google Maps accepte 9 étapes intermédiaires au maximum
+const $ = id => document.getElementById(id);
+const stops = [];
+let selected = null;
+let lastPos = null;
+let timer = null;
+
+function el(tag, props = {}, ...children) {
+  const n = document.createElement(tag);
+  Object.assign(n, props);
+  children.forEach(c => n.append(c));
+  return n;
+}
+
+/* ---------- Géolocalisation ---------- */
+function getPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("Géolocalisation indisponible sur cet appareil."));
+    navigator.geolocation.getCurrentPosition(
+      p => resolve({ lat: p.coords.latitude, lon: p.coords.longitude }),
+      e => reject(new Error(e.code === 1
+        ? "Accès à la position refusé. Android : Paramètres > Applications > Chrome > Autorisations > Position."
+        : "Position introuvable. Activez la localisation du téléphone et réessayez.")),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  });
+}
+async function locate() {
+  const g = $("gps");
+  g.className = "sub"; g.textContent = "Localisation en cours…";
+  try {
+    lastPos = await getPosition();
+    g.className = "sub ok"; g.textContent = "Position détectée ✓";
+  } catch (e) {
+    g.className = "err"; g.textContent = e.message;
+  }
+}
+$("relocate").onclick = locate;
+
+/* ---------- Autocomplétion (Base Adresse Nationale) ---------- */
+$("addr").addEventListener("input", () => {
+  selected = null; $("add").disabled = true;
+  clearTimeout(timer);
+  const q = $("addr").value.trim();
+  if (q.length < 3) { $("suggestions").replaceChildren(); return; }
+  timer = setTimeout(() => suggest(q), 300);
+});
+async function suggest(q) {
+  try {
+    let url = `https://api-adresse.data.gouv.fr/search/?q=${encodeURIComponent(q)}&limit=5&autocomplete=1`;
+    if (lastPos) url += `&lat=${lastPos.lat}&lon=${lastPos.lon}`;
+    const j = await (await fetch(url)).json();
+    const box = $("suggestions");
+    box.replaceChildren();
+    j.features.forEach(f => {
+      const b = el("button", { type: "button", textContent: f.properties.label });
+      b.onclick = () => {
+        selected = { label: f.properties.label, lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] };
+        $("addr").value = selected.label;
+        box.replaceChildren();
+        $("add").disabled = false;
+      };
+      box.append(b);
+    });
+  } catch { $("formErr").textContent = "Service d'adresses injoignable. Vérifiez la connexion."; }
+}
+
+/* ---------- Liste des livraisons ---------- */
+$("add").onclick = () => {
+  $("formErr").textContent = "";
+  if (!selected) return;
+  if (stops.length >= MAX_STOPS) { $("formErr").textContent = `Maximum ${MAX_STOPS} livraisons.`; return; }
+  stops.push({ name: $("name").value.trim() || `Client ${stops.length + 1}`, ...selected });
+  $("name").value = ""; $("addr").value = ""; selected = null; $("add").disabled = true;
+  $("result").hidden = true;
+  renderStops();
+};
+function renderStops() {
+  $("stopsCard").hidden = stops.length === 0;
+  const ul = $("stops"); ul.replaceChildren();
+  stops.forEach((s, i) => {
+    const rm = el("button", { className: "rm", type: "button", textContent: "✕", title: "Supprimer" });
+    rm.onclick = () => { stops.splice(i, 1); $("result").hidden = true; renderStops(); };
+    ul.append(el("li", { className: "stop" },
+      el("div", {}, el("div", { className: "stop-name", textContent: s.name }), el("div", { className: "stop-addr", textContent: s.label })),
+      rm));
+  });
+}
+
+/* ---------- Optimisation ---------- */
+function permutations(a) {
+  if (a.length <= 1) return [a];
+  return a.flatMap((x, i) => permutations([...a.slice(0, i), ...a.slice(i + 1)]).map(p => [x, ...p]));
+}
+function fmt(sec) {
+  const m = Math.max(1, Math.round(sec / 60));
+  return m >= 60 ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} min` : `${m} min`;
+}
+const fmtKm = m => `${(m / 1000).toFixed(1).replace(".", ",")} km`;
+
+// Départ = origine ET destination (retour), livraisons = étapes intermédiaires dans l'ordre optimal.
+function mapsUrl(start, orderedStops) {
+  const ll = p => `${p.lat},${p.lon}`;
+  const params = new URLSearchParams({
+    api: "1",
+    origin: ll(start),
+    destination: ll(start),
+    waypoints: orderedStops.map(ll).join("|"),
+    travelmode: "driving"
+  });
+  return `https://www.google.com/maps/dir/?${params.toString()}`;
+}
+
+$("calc").onclick = async () => {
+  const btn = $("calc"), err = $("calcErr");
+  err.textContent = ""; btn.disabled = true; btn.textContent = "Calcul en cours…";
+  try {
+    const start = await getPosition();
+    lastPos = start;
+    const pts = [start, ...stops];
+    const coords = pts.map(p => `${p.lon},${p.lat}`).join(";");
+    const r = await fetch(`https://router.project-osrm.org/table/v1/driving/${coords}?annotations=duration,distance`);
+    const j = await r.json();
+    if (j.code !== "Ok") throw new Error("Calcul d'itinéraire impossible pour ces adresses.");
+    const D = j.durations, K = j.distances;
+    if (D.flat().some(v => v === null)) throw new Error("Une adresse n'est pas joignable en voiture.");
+
+    let best = null;
+    for (const perm of permutations(stops.map((_, i) => i + 1))) {
+      const path = [0, ...perm, 0];
+      let t = 0;
+      for (let k = 0; k < path.length - 1; k++) t += D[path[k]][path[k + 1]];
+      if (!best || t < best.t) best = { path, t };
+    }
+    render(best, pts, D, K);
+  } catch (e) {
+    err.textContent = e.message || "Erreur inattendue.";
+  } finally {
+    btn.disabled = false; btn.textContent = "Calculer le trajet optimal";
+  }
+};
+
+/* ---------- Affichage du résultat ---------- */
+function render(best, pts, D, K) {
+  const box = $("result"); box.replaceChildren(); box.hidden = false;
+  let dist = 0;
+  for (let k = 0; k < best.path.length - 1; k++) dist += K[best.path[k]][best.path[k + 1]];
+  box.append(el("div", { className: "total", textContent: `Durée totale : ${fmt(best.t)} (${fmtKm(dist)})` }));
+  box.append(el("div", { className: "sub", textContent: "Temps de conduite estimé hors trafic et hors temps passé chez les clients." }));
+
+  const list = el("ol");
+  for (let k = 1; k < best.path.length; k++) {
+    const to = best.path[k], from = best.path[k - 1];
+    const isReturn = to === 0;
+    list.append(el("li", { className: "step" },
+      el("div", { className: "stop-name" },
+        el("span", { className: "num", textContent: isReturn ? "↩" : `${k}.` }),
+        isReturn ? " Retour au départ" : ` ${pts[to].name}`),
+      el("div", { className: "stop-addr", textContent: isReturn ? "Point de départ" : pts[to].label }),
+      el("div", { className: "leg", textContent: `Trajet : ${fmt(D[from][to])} · ${fmtKm(K[from][to])}` })));
+  }
+  box.append(list);
+
+  const orderedStops = best.path.slice(1, -1).map(i => pts[i]);
+  box.append(el("a", { className: "btn", href: mapsUrl(pts[0], orderedStops), target: "_blank", rel: "noopener",
+                       textContent: "Ouvrir la tournée dans Google Maps" }));
+  box.scrollIntoView({ behavior: "smooth" });
+}
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js");
+locate();
+</script>
+</body>
+</html>

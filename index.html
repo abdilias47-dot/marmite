@@ -42,7 +42,7 @@
 </head>
 <body>
 <h1>La Marmite d'Or</h1>
-<div class="sub">Tournée optimisée – départ depuis votre position, retour au départ.</div>
+<div class="sub">Tournée optimisée pour livrer chaque client le plus tôt possible – départ depuis votre position, retour au départ.</div>
 
 <div class="card">
   <div id="gps" class="sub" style="margin:0">Localisation en cours…</div>
@@ -198,9 +198,16 @@ $("calc").onclick = async () => {
     let best = null;
     for (const perm of permutations(stops.map((_, i) => i + 1))) {
       const path = [0, ...perm, 0];
-      let t = 0;
-      for (let k = 0; k < path.length - 1; k++) t += D[path[k]][path[k + 1]];
-      if (!best || t < best.t) best = { path, t };
+      // Critère : somme des heures d'arrivée chez les clients (le retour au départ n'est pas optimisé),
+      // pour que chaque client soit livré le plus tôt possible. Égalité : trajet total le plus court.
+      let t = 0, wait = 0;
+      const arr = [0];
+      for (let k = 0; k < path.length - 1; k++) {
+        t += D[path[k]][path[k + 1]];
+        arr.push(t);
+        if (k < path.length - 2) wait += t;
+      }
+      if (!best || wait < best.wait - 1e-6 || (Math.abs(wait - best.wait) <= 1e-6 && t < best.t)) best = { path, t, wait, arr };
     }
     render(best, pts, D, K);
   } catch (e) {
@@ -227,7 +234,7 @@ function render(best, pts, D, K) {
         el("span", { className: "num", textContent: isReturn ? "↩" : `${k}.` }),
         isReturn ? " Retour au départ" : ` ${pts[to].name}`),
       el("div", { className: "stop-addr", textContent: isReturn ? "Point de départ" : pts[to].label }),
-      el("div", { className: "leg", textContent: `Trajet : ${fmt(D[from][to])} · ${fmtKm(K[from][to])}` })));
+      el("div", { className: "leg", textContent: `Trajet : ${fmt(D[from][to])} · ${fmtKm(K[from][to])}` + (isReturn ? "" : ` · Arrivée dans ${fmt(best.arr[k])}`) })));
   }
   box.append(list);
 

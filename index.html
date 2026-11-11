@@ -127,16 +127,35 @@ async function fetchAddresses(q, withPos, withAuto) {
   return j.features;
 }
 
+async function fetchPhoton(q) {
+  let url = `https://photon.komoot.io/api/?q=${encodeURIComponent(q)}&limit=5&lang=fr&bbox=-5.5,41,10,51.5`;
+  if (lastPos) url += `&lat=${lastPos.lat}&lon=${lastPos.lon}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Photon HTTP ${r.status}`);
+  const j = await r.json();
+  if (!Array.isArray(j.features)) throw new Error("Photon : réponse inattendue");
+  // On aligne le format sur celui de la BAN : properties.label + geometry.coordinates
+  return j.features.map(f => {
+    const p = f.properties;
+    const rue = p.street ? `${p.housenumber ? p.housenumber + " " : ""}${p.street}` : p.name;
+    return { properties: { label: [rue, [p.postcode, p.city].filter(Boolean).join(" ")].filter(Boolean).join(", ") },
+             geometry: f.geometry };
+  });
+}
+
 async function suggest(q) {
   const box = $("suggestions");
   let features = null, lastErr = null;
-  // Essais successifs : complet, sans position, sans autocomplétion
-  for (const [pos, auto] of [[true, true], [false, true], [false, false]]) {
+  for (const [pos, auto] of [[true, true], [false, false]]) {
     try { features = await fetchAddresses(q, pos, auto); break; }
     catch (e) { lastErr = e; }
   }
   if (!features) {
-    $("formErr").textContent = `Service d'adresses injoignable (${lastErr && lastErr.message}).`;
+    try { features = await fetchPhoton(q); }
+    catch (e) { lastErr = new Error(`${lastErr && lastErr.message} / ${e.message}`); }
+  }
+  if (!features) {
+    $("formErr").textContent = `Aucun service d'adresses ne répond (${lastErr && lastErr.message}).`;
     return;
   }
   $("formErr").textContent = "";
